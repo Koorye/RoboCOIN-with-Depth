@@ -32,9 +32,6 @@ def main():
                         choices=["da3", "da3_rife", "vda"])
     parser.add_argument("--sample-stride", type=int, default=1,
                         help="RIFE 采样步长（da3_rife 专用，默认 1=不采样）")
-    parser.add_argument("--rife-home", default=None,
-                        help="Practical-RIFE 目录（默认 third_party/Practical-RIFE）")
-    
     parser.add_argument("--da3-model", default="depth-anything/DA3METRIC-LARGE")
     parser.add_argument("--da3-process-res", type=int, default=504)
     parser.add_argument("--da3-chunk-size", type=int, default=0)
@@ -59,9 +56,7 @@ def main():
         )
         if args.strategy == "da3_rife":
             repair_kwargs["sample_stride"] = args.sample_stride
-            if args.rife_home:
-                repair_kwargs["rife_home"] = args.rife_home
-    elif args.strategy == "vda":
+elif args.strategy == "vda":
         repair_kwargs = dict(
             checkpoint=args.vda_checkpoint, encoder=args.vda_encoder,
             input_size=args.vda_input_size, metric=args.vda_metric,

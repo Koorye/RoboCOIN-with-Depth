@@ -35,12 +35,11 @@ class DA3RIFEDepthRepair(DA3DepthRepair):
     def __init__(
         self,
         sample_stride: int = 1,
-        rife_home: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._sample_stride = sample_stride
-        self._rife_home = Path(rife_home) if rife_home else _RIFE_HOME
+        self._rife_home = _RIFE_HOME
         self._rife_model = None
 
     # ------------------------------------------------------------------

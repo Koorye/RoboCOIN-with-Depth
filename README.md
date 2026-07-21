@@ -365,4 +365,3 @@ python scripts/load_lerobot.py --repo-id test --camera all
 - [LeRobot](https://github.com/huggingface/lerobot) — 机器人数据集标准框架
 - [TorchCodec](https://github.com/pytorch/torchcodec) — PyTorch 原生视频编解码库
 - [ffmpeg](https://ffmpeg.org) / [x265](https://www.videolan.org/developers/x265.html) — H.265 编码器，gray12le 格式支持
-- [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) — 示例数据集来源

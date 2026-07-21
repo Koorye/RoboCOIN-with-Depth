@@ -6,10 +6,45 @@
 
 **2026.7.21**
 
-1. 集成 RIFE 插帧，对源视频抽帧后再补帧，速度提升 3 倍以上
-2. 支持断点续处理，自动检测未完成视频并继续处理
-3. 新增 `add_depth_fs_parallel.py`，支持多进程并行处理，异步 GPU 与视频编码，速度提升 20%
-4. 新增日志记录，输出每个视频的推理时间、编码时间、总耗时
+#### 1. RIFE 插帧加速（3×+）
+
+DA3 逐帧推理是瓶颈。RIFE 策略对源视频均匀采样（stride=5 → 取 1/5 帧），仅关键帧走 DA3，其余帧由 RIFE 光流 warp 补齐：
+
+```mermaid
+flowchart LR
+    A["原始视频<br/>N 帧"] --> B["均匀采样<br/>stride=5"]
+    B --> C["关键帧<br/>N/5 帧"]
+    C --> D["DA3 推理<br/>关键帧深度"]
+    A --> E["RIFE 光流<br/>RGB 帧间运动"]
+    D --> F["RIFE Warp<br/>光流作用于深度"]
+    E --> F
+    F --> G["完整深度视频<br/>N 帧"]
+```
+
+综合速度提升 **3 倍以上**，显存不变（DA3 仍逐帧推理关键帧）。
+
+#### 2. 并行流水线（+20% 吞吐）
+
+`add_depth_fs_parallel.py` 将解码、推理、编码拆入三个线程，通过两个 size=1 队列连接：
+
+```mermaid
+flowchart TB
+    subgraph Pipeline["2 队列流水线"]
+        P["🔵 Worker 1<br/>预读取<br/>ffmpeg 解码"] -->|"q1 (size=1)<br/>prefetch→GPU"| G["🟢 Worker 2<br/>GPU 推理<br/>DA3 / RIFE"]
+        G -->|"q3 (size=1)<br/>GPU→post"| F["🟠 Worker 3<br/>后处理<br/>smooth + ffmpeg 编码"]
+    end
+
+    P -.->|"阻塞: q1 满<br/>(GPU 未取走)"| P
+    G -.->|"阻塞: q3 满<br/>(后处理未跟上)"| G
+    F -.->|"阻塞: q3 空<br/>(GPU 未完成)"| F
+```
+
+比串行版吞吐提升约 **20%**（主要来自解码与推理重叠）。
+
+#### 3. 其他
+
+- 支持断点续处理，自动检测 `.tmp` 标记跳过已完成视频
+- 日志记录每个视频的推理/编码耗时，输出到 `--log-file`
 
 ## 策略对比
 
@@ -235,7 +270,7 @@ python scripts/load_lerobot.py --repo-id dataset --native
 
 详细参数通过 `--help` 查看。
 
-### `add_depth_fs.py` — 文件系统级增强（快速，V2.1 格式）
+### `add_depth_fs.py` — 文件系统级增强（串行）
 
 ```bash
 python scripts/add_depth_fs.py --dataset-dir data/lerobot/dataset --strategy da3
@@ -244,9 +279,40 @@ python scripts/add_depth_fs.py --dataset-dir data/lerobot/dataset --strategy da3
 | 参数 | 说明 | 默认 |
 |------|------|------|
 | `--dataset-dir` | 数据集根目录 | 必填 |
-| `--strategy` | da3 / vda | da3 |
-| `--fps` / `--crf` / `--preset` | 编码参数 | 30/15/medium |
+| `--strategy` | da3 / da3_rife / vda | da3 |
+| `--sample-stride` | RIFE 采样步长（da3_rife 专用） | 1 |
+| `--fps` / `--crf` / `--preset` | 编码参数 | 30/6/medium |
 | `--normalize` | min-max 归一化 | False |
+| `--log-file` | 日志文件路径 | None |
+| `--da3-*` | DA3 模型/分辨率/chunk/overlap/temporal | — |
+| `--vda-*` | VDA encoder/checkpoint/input/metric/invert/fp32 | — |
+
+### `add_depth_fs_parallel.py` — 文件系统级增强（并行流水线，推荐）
+
+```bash
+python scripts/add_depth_fs_parallel.py --dataset-dir data/lerobot/dataset --strategy da3_rife --sample-stride 5
+```
+
+与 `add_depth_fs.py` 参数完全一致，但采用 **2 队列流水线架构**：
+
+```
+预读取 ──q1──▶ GPU推理 ──q3──▶ 后处理/ffmpeg
+```
+
+- **预读取线程**：持续解码后续视频，GPU 不等 I/O
+- **GPU 推理线程**：拿到帧立即推理，不等 ffmpeg
+- **后处理线程**：smooth → stats → normalize → ffmpeg 编码异步执行
+
+`q1`/`q3` size=1 形成背压，保证最多 1 个 GPU + 1 个 ffmpeg 同时运行，不会 OOM。整体吞吐比串行版提升约 20%。
+
+| 参数 | 说明 | 默认 |
+|------|------|------|
+| `--dataset-dir` | 数据集根目录 | 必填 |
+| `--strategy` | da3 / da3_rife / vda | da3 |
+| `--sample-stride` | RIFE 采样步长（da3_rife 专用） | 1 |
+| `--fps` / `--crf` / `--preset` | 编码参数 | 30/6/medium |
+| `--normalize` | min-max 归一化 | False |
+| `--log-file` | 日志文件路径 | None |
 | `--da3-*` | DA3 模型/分辨率/chunk/overlap/temporal | — |
 | `--vda-*` | VDA encoder/checkpoint/input/metric/invert/fp32 | — |
 

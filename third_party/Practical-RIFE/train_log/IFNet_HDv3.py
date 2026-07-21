@@ -96,7 +96,7 @@ class IFNet(nn.Module):
         self.block1 = IFBlock(8+4+8+8, c=128)
         self.block2 = IFBlock(8+4+8+8, c=96)
         self.block3 = IFBlock(8+4+8+8, c=64)
-        self.block4 = IFBlock(8+4+8+8, c=32)
+        self.block4 = IFBlock(8+4+8+8, c=24)
         self.encode = Head()
 
         # not used during inference

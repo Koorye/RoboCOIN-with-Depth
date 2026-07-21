@@ -34,3 +34,7 @@ tests/output/
 
 # Jupyter
 .ipynb_checkpoints/
+
+pcds/
+
+log.txt

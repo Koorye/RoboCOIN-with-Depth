@@ -68,8 +68,8 @@ def _make_pcd_renderer(H=480, W=640):
 
         valid = xyz[valid_mask]
         valid_colors = colors[valid_mask] if colors is not None else None
-        if len(valid) > 20000:
-            idx = np.random.RandomState(0).choice(len(valid), 20000, replace=False)
+        if len(valid) > 200000:
+            idx = np.random.RandomState(0).choice(len(valid), 200000, replace=False)
             valid = valid[idx]
             valid_colors = valid_colors[idx] if valid_colors is not None else None
 
@@ -245,7 +245,6 @@ def main():
                     depth = depth.numpy()
                 if depth.ndim == 3 and depth.shape[0] in (1, 3, 4):
                     depth = depth[0]
-                print(depth)
                 imgs[(ri, 1)].set_data(_depth_to_color(depth))
             if has_pcd and pcd_key in sample:
                 imgs[(ri, 2)].set_data(render_pcd(sample[pcd_key],

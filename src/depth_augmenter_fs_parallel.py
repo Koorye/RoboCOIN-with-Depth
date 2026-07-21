@@ -33,10 +33,14 @@ from src.depth_augmenter_fs import DepthAugmenterFS, _decode_video
 class ParallelDepthAugmenterFS(DepthAugmenterFS):
     """带预解码和异步后处理的深度增强器。
 
-    继承 DepthAugmenterFS，覆盖 run()：
-    - 后台线程持续解码，GPU 推理从队列取帧，不等 I/O
-    - 推理完成后，smooth + stats + normalize + encode 打包到后台线程
-    - 主线程立即处理下一个 episode
+    继承 DepthAugmenterFS，覆盖 run()。
+
+    2 队列流水线：
+    - q1 (prefetch→GPU):  预读取下一视频，满时阻塞，GPU 不等 I/O
+    - q3 (GPU→post):      GPU 完成后推结果，满时阻塞，背压限速
+
+    GPU 拿到帧立即推理，不等待上一轮 ffmpeg。
+    q3 size=1 保证最多 1 个 ffmpeg 在跑，不会 OOM。
     """
 
     # ------------------------------------------------------------------
@@ -121,97 +125,142 @@ class ParallelDepthAugmenterFS(DepthAugmenterFS):
             logger.info("=" * 60)
 
             all_ep_stats = []
-            post_threads: list[threading.Thread] = []
 
-            # 预解码队列
-            rgb_queue: queue.Queue = queue.Queue(maxsize=2)
+            # ================================================================
+            # 3 队列流水线
+            #
+            #   预读取 ──q1──▶ GPU推理 ──q3──▶ 后处理/ffmpeg
+            #
+            # q1 (size=1): 预读取最多领先 1 个视频，满时阻塞
+            # q3 (size=1): GPU 完成后推结果，满时阻塞 → 自然限制 ffmpeg 并发
+            #
+            # GPU 拿到帧立即推理，不等待上一轮 ffmpeg。
+            # 背压来自 q3: 若后处理慢，GPU 推结果时阻塞，自然限速。
+            # ================================================================
 
-            def _prefetch_worker():
-                for idx, mp4_path in enumerate(mp4_files):
+            # 队列1: prefetch → GPU
+            q1_prefetch: queue.Queue = queue.Queue(maxsize=1)
+
+            # 队列3: GPU → 后处理
+            q3_depth: queue.Queue = queue.Queue(maxsize=1)
+
+            # ---- Worker 1: 预读取视频 ----
+            def _worker_prefetch():
+                for mp4_path in mp4_files:
                     fname = mp4_path.name
-                    logger.debug(f"[prefetch] decoding {fname} ...")
+                    logger.info(f"[prefetch] decoding {fname} ...")
                     t0 = time.time()
                     frames = _decode_video(mp4_path)
                     dt = time.time() - t0
                     if frames:
                         logger.info(
-                            f"[prefetch] {fname} decoded: "
-                            f"{len(frames)} frames in {dt:.1f}s"
+                            f"[prefetch] {fname}: {len(frames)} frames "
+                            f"in {dt:.1f}s"
                         )
                     else:
                         logger.warning(
-                            f"[prefetch] {fname} decode FAILED ({dt:.1f}s)"
+                            f"[prefetch] {fname}: decode FAILED ({dt:.1f}s)"
                         )
-                    rgb_queue.put((idx, mp4_path, frames))
-                logger.debug("[prefetch] all done, sentinel out")
-                rgb_queue.put(None)
+                    # size=1: 队列满则阻塞，等 GPU 取走
+                    q1_prefetch.put((mp4_path, frames))
+                # 哨兵通知下游结束
+                q1_prefetch.put(None)
 
-            prefetch_thread = threading.Thread(
-                target=_prefetch_worker, daemon=True)
-            prefetch_thread.start()
+            # ---- Worker 2: GPU 深度推理 ----
+            def _worker_gpu():
+                while True:
+                    item = q1_prefetch.get()
+                    if item is None:                # 哨兵：所有视频已处理
+                        q3_depth.put(None)          # 传递哨兵给后处理
+                        break
 
-            # ---- 主线程：取帧 → GPU 推理 → 启动后处理线程 ----
-            for _ in tqdm(range(n), desc="inference"):
-                t0 = time.time()
-                item = rgb_queue.get()
-                wait = time.time() - t0
-                if item is None:
-                    logger.info("[main] got sentinel, loop ends")
-                    break
-                idx, mp4_path, rgb_frames = item
-                fname = mp4_path.name
+                    mp4_path, rgb_frames = item
+                    fname = mp4_path.name
 
-                if wait > 0.1:
-                    logger.warning(
-                        f"[main] waited {wait:.1f}s for {fname}"
+                    if not rgb_frames:
+                        logger.warning(f"[gpu] {fname}: skip (decode failed)")
+                        pbar.update(1)
+                        continue
+
+                    logger.info(
+                        f"[gpu] inference start: {fname} "
+                        f"({len(rgb_frames)} frames)"
                     )
-                else:
-                    logger.debug(
-                        f"[main] got {fname} immediately (wait={wait:.3f}s)"
+                    t0 = time.time()
+                    depth_frames = self._repair.repair_frames(rgb_frames, [])
+                    dt = time.time() - t0
+                    logger.info(
+                        f"[gpu] inference done: {fname} ({dt:.1f}s)"
                     )
 
-                if not rgb_frames:
-                    logger.warning(f"[main] {fname}: empty frames, skip")
-                    continue
+                    # size=1: 若后处理未完成则阻塞，自然限速
+                    q3_depth.put((mp4_path, depth_frames))
 
-                # GPU 深度推理（无 temporal，快速释放 GPU）
-                logger.info(
-                    f"[main] GPU inference start: {fname} "
-                    f"({len(rgb_frames)} frames)"
-                )
-                t0 = time.time()
-                depth_frames = self._repair.repair_frames(rgb_frames, [])
-                print(depth_frames[0])
-                dt_infer = time.time() - t0
-                logger.info(
-                    f"[main] GPU inference done:  {fname} "
-                    f"({dt_infer:.1f}s), handing off to postprocess"
-                )
+            # ---- Worker 3: 后处理 + ffmpeg 编码 ----
+            def _worker_postprocess():
+                while True:
+                    item = q3_depth.get()
+                    if item is None:                # 哨兵：全部完成
+                        break
 
-                # 后处理（smooth + stats + normalize + encode）→ 后台线程
-                depth_path = str(depth_dir / mp4_path.name)
-                t = threading.Thread(
-                    target=self._postprocess_and_encode,
-                    args=(depth_frames, depth_path, normalize,
-                          fname, all_ep_stats),
-                    daemon=True,
-                )
-                t.start()
-                post_threads.append(t)
-                alive = sum(1 for t in post_threads if t.is_alive())
-                logger.info(
-                    f"[main] postprocess launched: {fname} "
-                    f"(active: {alive})"
-                )
+                    mp4_path, depth_frames = item
+                    fname = mp4_path.name
 
-            prefetch_thread.join()
+                    try:
+                        # 时序平滑
+                        t0 = time.time()
+                        depth_frames = self._smooth_depth(depth_frames)
+                        dt_smooth = time.time() - t0
 
-            # ---- 等待所有后处理完成 ----
-            n_post = len(post_threads)
-            logger.info(f"Waiting for {n_post} postprocess threads ...")
-            for t in tqdm(post_threads, desc="postprocess"):
-                t.join()
-            logger.info("All postprocess done.")
+                        # 统计量
+                        all_ep_stats.append(
+                            self._encoder.compute_stats(depth_frames))
+
+                        # 归一化或钳位
+                        if normalize:
+                            dmin, dmax = self._encoder.normalize_params(
+                                depth_frames, percentile=95)
+                            norm = (dmin, dmax)
+                        else:
+                            norm = None
+                            depth_frames = [np.clip(f, 0, 4095)
+                                            for f in depth_frames]
+
+                        # ffmpeg 编码
+                        depth_path = str(depth_dir / mp4_path.name)
+                        t0 = time.time()
+                        self._encoder.encode_from_arrays(
+                            depth_frames, depth_path, normalize=norm)
+                        os.rename(depth_path, depth_path + ".tmp")
+                        dt_encode = time.time() - t0
+
+                        logger.info(
+                            f"[post] {fname}: smooth={dt_smooth:.1f}s, "
+                            f"encode={dt_encode:.1f}s"
+                        )
+                    except Exception:
+                        logger.exception(f"[post] {fname} FAILED")
+
+                    pbar.update(1)
+
+            # ---- 启动流水线 ----
+            t_prefetch = threading.Thread(
+                target=_worker_prefetch, name="prefetch", daemon=True)
+            t_gpu = threading.Thread(
+                target=_worker_gpu, name="gpu", daemon=True)
+            t_post = threading.Thread(
+                target=_worker_postprocess, name="post", daemon=True)
+
+            with tqdm(total=n, desc=f"inference {rgb_dir.name}") as pbar:
+                t_prefetch.start()
+                t_gpu.start()
+                t_post.start()
+
+                t_prefetch.join()
+                t_gpu.join()
+                t_post.join()
+
+            logger.info("Pipeline done.")
 
             # ---- 注入 meta ----
             depth_key = depth_dir.name.replace("rgb", "depth")
@@ -226,55 +275,3 @@ class ParallelDepthAugmenterFS(DepthAugmenterFS):
             json.dump(info, f, indent=4)
         logger.info("Done.")
 
-    # ------------------------------------------------------------------
-    # 后台后处理线程（smooth → stats → normalize → encode）
-    # ------------------------------------------------------------------
-
-    def _postprocess_and_encode(
-        self,
-        depth_frames: list[np.ndarray],
-        depth_path: str,
-        normalize: bool,
-        fname: str,
-        all_ep_stats: list,
-    ) -> None:
-        """后台线程：smooth → stats → normalize/clip → encode → rename。
-
-        在线程间共享的 ``all_ep_stats`` 通过 append 操作修改，
-        Python list.append 是线程安全的。
-        """
-        try:
-            # 1. 时序平滑（CPU）
-            t0 = time.time()
-            depth_frames = self._smooth_depth(depth_frames)
-            dt_smooth = time.time() - t0
-            logger.info(
-                f"[post] smooth done: {fname} ({dt_smooth:.1f}s)"
-            )
-
-            # 2. 统计量
-            all_ep_stats.append(
-                self._encoder.compute_stats(depth_frames))
-
-            # 3. 归一化或钳位
-            if normalize:
-                dmin, dmax = self._encoder.normalize_params(
-                    depth_frames, percentile=95)
-                norm = (dmin, dmax)
-            else:
-                norm = None
-                depth_frames = [np.clip(f, 0, 4095)
-                                for f in depth_frames]
-
-            # 4. 编码 + 重命名
-            t0 = time.time()
-            self._encoder.encode_from_arrays(
-                depth_frames, depth_path, normalize=norm)
-            os.rename(depth_path, depth_path + ".tmp")
-            dt_encode = time.time() - t0
-            logger.info(
-                f"[post] encode done: {fname} ({dt_encode:.1f}s)"
-            )
-
-        except Exception as e:
-            logger.error(f"[post] {fname} FAILED: {e}")

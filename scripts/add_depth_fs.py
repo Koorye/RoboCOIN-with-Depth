@@ -56,7 +56,7 @@ def main():
         )
         if args.strategy == "da3_rife":
             repair_kwargs["sample_stride"] = args.sample_stride
-elif args.strategy == "vda":
+    elif args.strategy == "vda":
         repair_kwargs = dict(
             checkpoint=args.vda_checkpoint, encoder=args.vda_encoder,
             input_size=args.vda_input_size, metric=args.vda_metric,

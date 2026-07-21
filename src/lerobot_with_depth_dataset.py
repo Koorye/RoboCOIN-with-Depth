@@ -83,8 +83,8 @@ class LeRobotWithDepthDataset(LeRobotDataset):
         instance._pcd_cameras = pcd_cameras or {}
         instance._pcd_stride = pcd_stride
         instance._depth_encoder = DepthVideoEncoder(fps=fps)
-        instance._pending_depths: dict[str, list] = {}
-        instance._depth_stats: dict[str, list] = {}
+        instance._pending_depths = {}
+        instance._depth_stats = {}
         instance._episode_counter = 0
         return instance
 

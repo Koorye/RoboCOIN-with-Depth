@@ -10,3 +10,5 @@ test/
 *.npz
 
 *.zip
+
+train_log_426/

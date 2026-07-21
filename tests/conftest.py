@@ -536,7 +536,7 @@ def pytest_collection_modifyitems(config, items):
 # ---------------------------------------------------------------------------
 
 _H5 = _PROJ_ROOT / "data" / "raw" / "AI2_Alphabot_2_arrange_teaset_0" / "20260318_104215_528.h5"
-_DEFAULT_SAMPLE = 100
+_DEFAULT_SAMPLE = 1000
 
 
 def _uniform_sample(frames: list, n: int) -> list:

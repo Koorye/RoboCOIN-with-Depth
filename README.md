@@ -2,13 +2,23 @@
 
 为 LeRobot 机器人数据集自动生成高质量深度图与点云的工具集。支持多种 SOTA 深度估计策略，12-bit H.265 高效编码，完全兼容原生 LeRobot 读取。
 
+## 版本更新
+
+**2026.7.21**
+
+1. 集成 RIFE 插帧，对源视频抽帧后再补帧，速度提升 3 倍以上
+2. 支持断点续处理，自动检测未完成视频并继续处理
+3. 新增 `add_depth_fs_parallel.py`，支持多进程并行处理，异步 GPU 与视频编码，速度提升 20%
+4. 新增日志记录，输出每个视频的推理时间、编码时间、总耗时
+
 ## 策略对比
 
 | 策略 | 原理 | 输入 | 绝对距离 | 精度 | 重建 | 帧间一致 | 时间(s) | 显存(MiB) | 评级 |
 |------|------|------|:--:|:--:|:--:|:--:|--:|--:|:--:|
 | DA3 MONO | ViT-L 单帧 DPT | RGB | ✗ | 中 | 中 | 低 | 2.0 | 7024 | ⭐⭐ |
 | DA3 METRIC | ViT-L DPT, metric 训练 | RGB | ✓ | 高 | 高 | 低 | 2.0 | 7024 | ⭐⭐⭐ |
-| **DA3 METRIC + Temporal** | **METRIC + EMA 平滑** | **RGB** | **✓** | **高** | **高** | **中** | **2.1** | **7024** | ⭐⭐⭐⭐ **（高效低资源首选）** |
+| DA3 METRIC + Temporal | METRIC + EMA 平滑 | RGB | ✓ | 高 | 高 | 中 | 2.1 | 7024 | ⭐⭐⭐⭐ |
+| **DA3 METRIC + RIFE** | **采样 + METRIC + 插帧** | **RGB** | **✓** | **高** | **高** | **较高** | **0.6** | **7024** | ⭐⭐⭐⭐⭐ **（高效低资源首选）** |
 | DA3 LARGE-1.1 | ViT-L 多帧 DualDPT | RGB | ✗ | — | 高 | 中 | 6.2 | 8612 | ⭐⭐ |
 | **DA3 NESTED-GIANT-LARGE-1.1** | **ViT-g + ViT-L 嵌套** | **RGB** | **✓** | **最高** | **最高** | **高** | **12.1** | **15070** | ⭐⭐⭐⭐⭐ **（高精度首选）** |
 | VDA | ViT-L 时序注意力, 32帧窗口 | RGB | ✗ | — | 中 | 高 | 4.7 | 10845 | ⭐⭐ |
@@ -119,17 +129,18 @@ conda install "ffmpeg<8" -c conda-forge
 pip install robocoin
 
 # 安装 PyTorch
-# 为了适配 xformers，建议使用 torch 2.10.0 CUDA 12.8或13.0
-pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130
-# 如果你的 NVIDIA 驱动低于 590，请安装 torch 2.10.0 CUDA 12.8
-# pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+# 为了适配 xformers 和 torchcodec，需要使用 torch > 2.12.0 CUDA 13.0
+pip install torch==2.12.1 torchvision==0.27.1 --index-url https://download.pytorch.org/whl/cu130
 pip install xformers
 
 # 安装 DA3 (从 third_party)
 pip install -e third_party/Depth-Anything-3
 
 # Torchcodec 版本必须高于 0.14.0，才能支持 gray12le
-pip install -U torchcodec
+pip install torchcodec==0.15.0
+
+# 安装日志
+pip install loguru
 
 # 对于其他策略，如 VDA 或 LingBot-Depth，请参考各自的安装说明
 ```
@@ -160,15 +171,16 @@ data/lerobot/dataset/
         └── observation.images.cam_right_rgb
 ```
 
-接下来，运行以下命令为数据集添加深度视频，该命令使用 DA3 METRIC + Temporal 策略，生成高质量深度图和点云：
+接下来，运行以下命令为数据集添加深度视频，该命令使用 DA3 METRIC + RIFE 策略，生成高质量深度图和点云：
 
 ```bash
 # 为已有 LeRobot 数据集添加深度
-python scripts/add_depth_fs.py \
+python scripts/add_depth_fs_parallel.py \
     --dataset-dir data/lerobot/dataset \
-    --strategy da3 \
+    --strategy da3_rife \
+    --sample-stride 5 \
     --da3-chunk-size 16 \
-    --da3-temporal-alpha 0.7
+    --log-file log.txt
 ```
 
 完成后，数据集目录下将添加深度视频，结构如：
@@ -203,11 +215,11 @@ data/lerobot/dataset/
 深度视频已添加到每个摄像头的 `observation.images.*_depth` 文件夹中，**完全兼容原生 LeRobot 读取**。
 
 ```bash
+# 含点云 PCD
+python scripts/load_lerobot.py --repo-id dataset
+
 # 原生 LeRobot（兼容开箱即用）
 python scripts/load_lerobot.py --repo-id dataset --native
-
-# 增强版（含点云 PCD）
-python scripts/load_lerobot.py --repo-id dataset
 ```
 
 **快捷键**: 

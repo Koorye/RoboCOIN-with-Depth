@@ -1,0 +1,15 @@
+[submodule "third_party/Depth-Anything-3"]
+	path = third_party/Depth-Anything-3
+	url = https://github.com/ByteDance-Seed/Depth-Anything-3.git
+[submodule "third_party/lingbot-depth"]
+	path = third_party/lingbot-depth
+	url = https://github.com/Robbyant/lingbot-depth.git
+[submodule "third_party/monst3r"]
+	path = third_party/monst3r
+	url = https://github.com/Junyi42/monst3r.git
+[submodule "third_party/video_depth_anything"]
+	path = third_party/video_depth_anything
+	url = https://github.com/DepthAnything/Video-Depth-Anything.git
+[submodule "third_party/lingbot-vision"]
+	path = third_party/lingbot-vision
+	url = https://github.com/Robbyant/lingbot-vision.git

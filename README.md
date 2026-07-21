@@ -28,11 +28,9 @@ flowchart LR
 `add_depth_fs_parallel.py` 将解码、推理、编码拆入三个线程，通过两个 size=1 队列连接：
 
 ```mermaid
-flowchart TB
-    subgraph Pipeline["2 队列流水线"]
+flowchart LR
         P["🔵 Worker 1<br/>预读取<br/>ffmpeg 解码"] -->|"q1 (size=1)<br/>prefetch→GPU"| G["🟢 Worker 2<br/>GPU 推理<br/>DA3 / RIFE"]
         G -->|"q3 (size=1)<br/>GPU→post"| F["🟠 Worker 3<br/>后处理<br/>smooth + ffmpeg 编码"]
-    end
 
     P -.->|"阻塞: q1 满<br/>(GPU 未取走)"| P
     G -.->|"阻塞: q3 满<br/>(后处理未跟上)"| G
